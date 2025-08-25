@@ -1,0 +1,43 @@
+{
+  "name": "@controlvector/mercury",
+  "version": "1.0.0",
+  "description": "Repository Analysis Agent - Evaluates codebases and generates deployment strategies",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "jest",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "fastify": "^4.24.3",
+    "@fastify/cors": "^8.4.0",
+    "@fastify/helmet": "^11.1.1",
+    "@fastify/rate-limit": "^9.1.0",
+    "dotenv": "^16.3.1",
+    "simple-git": "^3.20.0",
+    "js-yaml": "^4.1.0",
+    "semver": "^7.5.4",
+    "glob": "^10.3.10",
+    "mime-types": "^2.1.35",
+    "@octokit/rest": "^20.0.2",
+    "tar": "^6.2.0",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.4",
+    "@types/js-yaml": "^4.0.9",
+    "@types/semver": "^7.5.6",
+    "@types/mime-types": "^2.1.4",
+    "@types/tar": "^6.1.11",
+    "typescript": "^5.3.3",
+    "tsx": "^4.6.2",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.1.1",
+    "@types/jest": "^29.5.8"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
