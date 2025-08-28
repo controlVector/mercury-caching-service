@@ -32,9 +32,13 @@ export class RepositoryService {
   }
 
   async cloneOrUpdateRepository(url: string, branch = 'main', forceRefresh = false): Promise<RepositoryInfo> {
-    const repoId = this.getRepositoryId(url)
+    // Normalize GitHub tree URLs to extract repository URL and branch
+    const { repositoryUrl: normalizedUrl, extractedBranch } = this.normalizeGitHubUrl(url)
+    const finalBranch = extractedBranch || branch
+    
+    const repoId = this.getRepositoryId(normalizedUrl)
     const localPath = this.getLocalPath(repoId)
-    const name = this.extractRepoName(url)
+    const name = this.extractRepoName(normalizedUrl)
 
     try {
       const exists = await this.pathExists(localPath)
@@ -62,18 +66,18 @@ export class RepositoryService {
         // Update existing repository
         await this.git.cwd(localPath)
         await this.git.fetch()
-        await this.git.checkout(branch)
-        await this.git.pull('origin', branch)
+        await this.git.checkout(finalBranch)
+        await this.git.pull('origin', finalBranch)
       } else {
         // Clone new repository
-        await this.git.clone(url, localPath, ['--depth', '1', '--branch', branch])
+        await this.git.clone(normalizedUrl, localPath, ['--depth', '1', '--branch', finalBranch])
       }
 
       return {
         id: repoId,
-        url,
+        url: normalizedUrl,
         name,
-        branch,
+        branch: finalBranch,
         localPath,
         lastAnalyzed: new Date(),
         cacheExpiry: new Date(Date.now() + 60 * 60 * 1000)
@@ -95,6 +99,30 @@ export class RepositoryService {
   private extractRepoName(url: string): string {
     const match = url.match(/\/([^\/]+?)(?:\.git)?$/)
     return match ? match[1] : 'unknown'
+  }
+
+  /**
+   * Normalize GitHub tree URLs to extract repository URL and branch
+   * e.g., https://github.com/user/repo/tree/branch -> { repositoryUrl: https://github.com/user/repo, extractedBranch: branch }
+   */
+  private normalizeGitHubUrl(url: string): { repositoryUrl: string; extractedBranch?: string } {
+    // Validate URL parameter
+    if (!url || typeof url !== 'string') {
+      throw new Error('Invalid repository URL: URL must be a non-empty string')
+    }
+    
+    // Check if URL contains /tree/ pattern (GitHub branch/tree view)
+    const treeMatch = url.match(/^(https:\/\/github\.com\/[^\/]+\/[^\/]+)\/tree\/([^\/\?#]+)/)
+    
+    if (treeMatch) {
+      return {
+        repositoryUrl: treeMatch[1],
+        extractedBranch: treeMatch[2]
+      }
+    }
+    
+    // If not a tree URL, return as-is
+    return { repositoryUrl: url }
   }
 
   async analyzeRepository(repoInfo: RepositoryInfo, deepAnalysis = true): Promise<RepositoryAnalysis> {

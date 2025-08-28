@@ -66,7 +66,69 @@ export const DetectSecurityIssuesSchema = z.object({
   jwt_token: z.string()
 })
 
+// EXECUTABLE REPOSITORY TOOL SCHEMAS
+
+export const ExecuteRepositoryCloneSchema = z.object({
+  repository_url: z.string().url().describe('Git repository URL to clone'),
+  branch: z.string().default('main').describe('Branch to clone (main, develop, etc)'),
+  target_path: z.string().optional().describe('Target directory path (auto-generated if not provided)'),
+  workspace_id: z.string().describe('Workspace identifier'),
+  user_id: z.string().describe('User identifier'),
+  jwt_token: z.string().describe('JWT token for authentication')
+})
+
+export const ExecuteRepositoryBuildSchema = z.object({
+  repository_path: z.string().describe('Local path to cloned repository'),
+  build_command: z.string().optional().describe('Custom build command (auto-detected if not provided)'),
+  environment: z.record(z.string()).optional().describe('Environment variables for build'),
+  workspace_id: z.string().describe('Workspace identifier'),
+  user_id: z.string().describe('User identifier'),
+  jwt_token: z.string().describe('JWT token for authentication')
+})
+
+export const ExecuteRepositoryTestSchema = z.object({
+  repository_path: z.string().describe('Local path to built repository'),
+  test_command: z.string().optional().describe('Custom test command (auto-detected if not provided)'),
+  skip_tests: z.boolean().default(false).describe('Skip tests if true'),
+  workspace_id: z.string().describe('Workspace identifier'),
+  user_id: z.string().describe('User identifier'),
+  jwt_token: z.string().describe('JWT token for authentication')
+})
+
+export const ExecuteRepositoryPackageSchema = z.object({
+  repository_path: z.string().describe('Local path to tested repository'),
+  package_type: z.enum(['docker', 'zip', 'tar']).default('docker').describe('Package format'),
+  output_path: z.string().optional().describe('Output path for package (auto-generated if not provided)'),
+  docker_registry: z.string().optional().describe('Docker registry URL for docker packages'),
+  workspace_id: z.string().describe('Workspace identifier'),
+  user_id: z.string().describe('User identifier'),
+  jwt_token: z.string().describe('JWT token for authentication')
+})
+
 export const MERCURY_MCP_TOOLS = [
+  // EXECUTABLE REPOSITORY TOOLS (Real Actions)
+  {
+    name: 'mercury_execute_repository_clone',
+    description: 'EXECUTE: Clone git repository to local filesystem with branch selection and authentication',
+    inputSchema: ExecuteRepositoryCloneSchema
+  },
+  {
+    name: 'mercury_execute_repository_build',
+    description: 'EXECUTE: Build repository using detected build system (npm, maven, gradle, etc) with real command execution',
+    inputSchema: ExecuteRepositoryBuildSchema
+  },
+  {
+    name: 'mercury_execute_repository_test',
+    description: 'EXECUTE: Run repository tests with real test execution and result reporting',
+    inputSchema: ExecuteRepositoryTestSchema
+  },
+  {
+    name: 'mercury_execute_repository_package',
+    description: 'EXECUTE: Package repository as Docker container, ZIP, or TAR for deployment',
+    inputSchema: ExecuteRepositoryPackageSchema
+  },
+  
+  // ANALYSIS TOOLS (Information Gathering)
   {
     name: 'mercury_analyze_repository',
     description: 'Analyze repository structure, dependencies, and generate deployment recommendations',

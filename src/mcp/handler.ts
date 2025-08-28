@@ -6,6 +6,12 @@ import {
   SecurityIssuesOutput 
 } from './tools'
 import type { RepositoryAnalysis } from '../types/repository'
+import { spawn, exec } from 'child_process'
+import * as fs from 'fs/promises'
+import * as path from 'path'
+import { promisify } from 'util'
+
+const execAsync = promisify(exec)
 
 export class MCPHandler {
   private repositoryService: RepositoryService
@@ -49,6 +55,23 @@ export class MCPHandler {
           result = await this.detectSecurityIssues(args)
           break
           
+        // EXECUTABLE REPOSITORY TOOLS
+        case 'mercury_execute_repository_clone':
+          result = await this.executeRepositoryClone(args)
+          break
+          
+        case 'mercury_execute_repository_build':
+          result = await this.executeRepositoryBuild(args)
+          break
+          
+        case 'mercury_execute_repository_test':
+          result = await this.executeRepositoryTest(args)
+          break
+          
+        case 'mercury_execute_repository_package':
+          result = await this.executeRepositoryPackage(args)
+          break
+          
         default:
           throw new Error(`Unknown tool: ${toolName}`)
       }
@@ -75,6 +98,11 @@ export class MCPHandler {
 
   private async analyzeRepository(args: any): Promise<Partial<AnalyzeRepositoryOutput>> {
     const { repository_url, branch = 'main', force_refresh = false, deep_analysis = true } = args
+
+    // Validate required parameters
+    if (!repository_url || typeof repository_url !== 'string') {
+      throw new Error('repository_url is required and must be a valid URL string')
+    }
 
     // Clone or update repository
     const repoInfo = await this.repositoryService.cloneOrUpdateRepository(
@@ -413,5 +441,496 @@ export class MCPHandler {
 
   private generatePlanId(): string {
     return `deploy-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`
+  }
+
+  // EXECUTABLE REPOSITORY TOOLS IMPLEMENTATION
+
+  private async executeRepositoryClone(args: any): Promise<any> {
+    const { repository_url, branch = 'main', target_path, workspace_id, user_id } = args
+
+    // Validate required parameters
+    if (!repository_url || !workspace_id || !user_id) {
+      throw new Error('repository_url, workspace_id, and user_id are required')
+    }
+
+    const executionId = this.generateExecutionId()
+    const finalTargetPath = target_path || this.generateDefaultClonePath(repository_url, workspace_id)
+
+    console.log(`[Mercury] EXECUTE: Cloning repository ${repository_url} to ${finalTargetPath}`)
+
+    try {
+      // Ensure target directory exists
+      await fs.mkdir(path.dirname(finalTargetPath), { recursive: true })
+
+      // Check if target already exists and remove if so
+      try {
+        await fs.access(finalTargetPath)
+        await fs.rm(finalTargetPath, { recursive: true, force: true })
+        console.log(`[Mercury] Removed existing directory: ${finalTargetPath}`)
+      } catch {
+        // Directory doesn't exist, which is fine
+      }
+
+      // Execute git clone with shallow clone for speed
+      const cloneCommand = `git clone --depth 1 --branch ${branch} ${repository_url} ${finalTargetPath}`
+      const { stdout, stderr } = await execAsync(cloneCommand)
+
+      // Verify clone was successful
+      const exists = await this.pathExists(path.join(finalTargetPath, '.git'))
+      if (!exists) {
+        throw new Error('Clone verification failed - .git directory not found')
+      }
+
+      // Get repository info
+      const { stdout: remoteUrl } = await execAsync('git config --get remote.origin.url', { cwd: finalTargetPath })
+      const { stdout: currentBranch } = await execAsync('git branch --show-current', { cwd: finalTargetPath })
+      const { stdout: lastCommit } = await execAsync('git log -1 --format="%H %s"', { cwd: finalTargetPath })
+
+      console.log(`[Mercury] Successfully cloned repository ${repository_url} to ${finalTargetPath}`)
+
+      return {
+        execution: {
+          id: executionId,
+          status: 'completed',
+          repository_url,
+          branch: currentBranch.trim(),
+          target_path: finalTargetPath,
+          clone_depth: 1,
+          last_commit: lastCommit.trim(),
+          size_mb: await this.getDirectorySize(finalTargetPath),
+          completed_at: new Date().toISOString()
+        },
+        output: {
+          stdout: stdout.trim(),
+          stderr: stderr.trim()
+        }
+      }
+    } catch (error: any) {
+      console.error(`[Mercury] Repository clone failed:`, error)
+      return {
+        execution: {
+          id: executionId,
+          status: 'failed',
+          repository_url,
+          error: error.message,
+          failed_at: new Date().toISOString()
+        }
+      }
+    }
+  }
+
+  private async executeRepositoryBuild(args: any): Promise<any> {
+    const { repository_path, build_command, environment = {}, workspace_id, user_id } = args
+
+    // Validate required parameters
+    if (!repository_path || !workspace_id || !user_id) {
+      throw new Error('repository_path, workspace_id, and user_id are required')
+    }
+
+    const executionId = this.generateExecutionId()
+
+    console.log(`[Mercury] EXECUTE: Building repository at ${repository_path}`)
+
+    try {
+      // Verify repository path exists
+      const pathExists = await this.pathExists(repository_path)
+      if (!pathExists) {
+        throw new Error(`Repository path does not exist: ${repository_path}`)
+      }
+
+      // Auto-detect build command if not provided
+      let finalBuildCommand = build_command
+      if (!finalBuildCommand) {
+        finalBuildCommand = await this.detectBuildCommand(repository_path)
+      }
+
+      if (!finalBuildCommand) {
+        throw new Error('No build command provided and unable to auto-detect build system')
+      }
+
+      console.log(`[Mercury] Using build command: ${finalBuildCommand}`)
+
+      // Prepare environment variables
+      const buildEnv = { ...process.env, ...environment }
+
+      // Execute build command
+      const { stdout, stderr } = await execAsync(finalBuildCommand, {
+        cwd: repository_path,
+        env: buildEnv,
+        timeout: 300000 // 5 minutes timeout
+      })
+
+      // Check for build artifacts
+      const artifacts = await this.detectBuildArtifacts(repository_path)
+
+      console.log(`[Mercury] Successfully built repository at ${repository_path}`)
+
+      return {
+        execution: {
+          id: executionId,
+          status: 'completed',
+          repository_path,
+          build_command: finalBuildCommand,
+          artifacts,
+          build_time_seconds: 0, // TODO: Measure actual build time
+          completed_at: new Date().toISOString()
+        },
+        output: {
+          stdout: stdout.trim(),
+          stderr: stderr.trim()
+        }
+      }
+    } catch (error: any) {
+      console.error(`[Mercury] Repository build failed:`, error)
+      return {
+        execution: {
+          id: executionId,
+          status: 'failed',
+          repository_path,
+          build_command: build_command || 'auto-detect',
+          error: error.message,
+          failed_at: new Date().toISOString()
+        }
+      }
+    }
+  }
+
+  private async executeRepositoryTest(args: any): Promise<any> {
+    const { repository_path, test_command, skip_tests = false, workspace_id, user_id } = args
+
+    // Validate required parameters
+    if (!repository_path || !workspace_id || !user_id) {
+      throw new Error('repository_path, workspace_id, and user_id are required')
+    }
+
+    const executionId = this.generateExecutionId()
+
+    if (skip_tests) {
+      console.log(`[Mercury] EXECUTE: Skipping tests for repository at ${repository_path}`)
+      return {
+        execution: {
+          id: executionId,
+          status: 'skipped',
+          repository_path,
+          skip_tests: true,
+          skipped_at: new Date().toISOString()
+        }
+      }
+    }
+
+    console.log(`[Mercury] EXECUTE: Testing repository at ${repository_path}`)
+
+    try {
+      // Verify repository path exists
+      const pathExists = await this.pathExists(repository_path)
+      if (!pathExists) {
+        throw new Error(`Repository path does not exist: ${repository_path}`)
+      }
+
+      // Auto-detect test command if not provided
+      let finalTestCommand = test_command
+      if (!finalTestCommand) {
+        finalTestCommand = await this.detectTestCommand(repository_path)
+      }
+
+      if (!finalTestCommand) {
+        console.log(`[Mercury] No test command found for repository at ${repository_path}`)
+        return {
+          execution: {
+            id: executionId,
+            status: 'no_tests',
+            repository_path,
+            message: 'No test command found or configured',
+            completed_at: new Date().toISOString()
+          }
+        }
+      }
+
+      console.log(`[Mercury] Using test command: ${finalTestCommand}`)
+
+      // Execute test command
+      const { stdout, stderr } = await execAsync(finalTestCommand, {
+        cwd: repository_path,
+        timeout: 300000 // 5 minutes timeout
+      })
+
+      const testResults = this.parseTestResults(stdout, stderr)
+
+      console.log(`[Mercury] Successfully ran tests for repository at ${repository_path}`)
+
+      return {
+        execution: {
+          id: executionId,
+          status: 'completed',
+          repository_path,
+          test_command: finalTestCommand,
+          test_results: testResults,
+          completed_at: new Date().toISOString()
+        },
+        output: {
+          stdout: stdout.trim(),
+          stderr: stderr.trim()
+        }
+      }
+    } catch (error: any) {
+      console.error(`[Mercury] Repository tests failed:`, error)
+      return {
+        execution: {
+          id: executionId,
+          status: 'failed',
+          repository_path,
+          test_command: test_command || 'auto-detect',
+          error: error.message,
+          failed_at: new Date().toISOString()
+        }
+      }
+    }
+  }
+
+  private async executeRepositoryPackage(args: any): Promise<any> {
+    const { 
+      repository_path, 
+      package_type = 'docker', 
+      output_path, 
+      docker_registry, 
+      workspace_id, 
+      user_id 
+    } = args
+
+    // Validate required parameters
+    if (!repository_path || !workspace_id || !user_id) {
+      throw new Error('repository_path, workspace_id, and user_id are required')
+    }
+
+    const executionId = this.generateExecutionId()
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
+    const finalOutputPath = output_path || this.generateDefaultPackagePath(repository_path, package_type, timestamp)
+
+    console.log(`[Mercury] EXECUTE: Packaging repository at ${repository_path} as ${package_type}`)
+
+    try {
+      // Verify repository path exists
+      const pathExists = await this.pathExists(repository_path)
+      if (!pathExists) {
+        throw new Error(`Repository path does not exist: ${repository_path}`)
+      }
+
+      let packageResult: any = {}
+
+      switch (package_type) {
+        case 'docker':
+          packageResult = await this.packageAsDocker(repository_path, finalOutputPath, docker_registry)
+          break
+        case 'zip':
+          packageResult = await this.packageAsZip(repository_path, finalOutputPath)
+          break
+        case 'tar':
+          packageResult = await this.packageAsTar(repository_path, finalOutputPath)
+          break
+        default:
+          throw new Error(`Unsupported package type: ${package_type}`)
+      }
+
+      console.log(`[Mercury] Successfully packaged repository at ${repository_path}`)
+
+      return {
+        execution: {
+          id: executionId,
+          status: 'completed',
+          repository_path,
+          package_type,
+          output_path: finalOutputPath,
+          package_size_mb: packageResult.size_mb,
+          docker_image_tag: packageResult.image_tag,
+          completed_at: new Date().toISOString()
+        },
+        output: packageResult.output || {}
+      }
+    } catch (error: any) {
+      console.error(`[Mercury] Repository packaging failed:`, error)
+      return {
+        execution: {
+          id: executionId,
+          status: 'failed',
+          repository_path,
+          package_type,
+          error: error.message,
+          failed_at: new Date().toISOString()
+        }
+      }
+    }
+  }
+
+  // HELPER METHODS FOR EXECUTABLE TOOLS
+
+  private generateExecutionId(): string {
+    return `exec-${Date.now()}-${Math.random().toString(36).substr(2, 8)}`
+  }
+
+  private generateDefaultClonePath(repositoryUrl: string, workspaceId: string): string {
+    const repoName = repositoryUrl.split('/').pop()?.replace('.git', '') || 'unknown'
+    return path.join('./cache/repositories', workspaceId, repoName)
+  }
+
+  private generateDefaultPackagePath(repositoryPath: string, packageType: string, timestamp: string): string {
+    const repoName = path.basename(repositoryPath)
+    return path.join('./cache/packages', `${repoName}-${timestamp}.${packageType === 'docker' ? 'tar' : packageType}`)
+  }
+
+  private async pathExists(filePath: string): Promise<boolean> {
+    try {
+      await fs.access(filePath)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  private async getDirectorySize(dirPath: string): Promise<number> {
+    try {
+      const { stdout } = await execAsync(`du -sm "${dirPath}"`)
+      return parseInt(stdout.split('\t')[0]) || 0
+    } catch {
+      return 0
+    }
+  }
+
+  private async detectBuildCommand(repositoryPath: string): Promise<string | null> {
+    // Check for common build files and return appropriate command
+    if (await this.pathExists(path.join(repositoryPath, 'package.json'))) {
+      const packageJson = JSON.parse(await fs.readFile(path.join(repositoryPath, 'package.json'), 'utf8'))
+      if (packageJson.scripts?.build) return 'npm run build'
+      if (packageJson.scripts?.start) return 'npm install'
+    }
+
+    if (await this.pathExists(path.join(repositoryPath, 'Makefile'))) {
+      return 'make'
+    }
+
+    if (await this.pathExists(path.join(repositoryPath, 'pom.xml'))) {
+      return 'mvn package'
+    }
+
+    if (await this.pathExists(path.join(repositoryPath, 'go.mod'))) {
+      return 'go build .'
+    }
+
+    if (await this.pathExists(path.join(repositoryPath, 'Cargo.toml'))) {
+      return 'cargo build --release'
+    }
+
+    if (await this.pathExists(path.join(repositoryPath, 'requirements.txt'))) {
+      return 'pip install -r requirements.txt'
+    }
+
+    return null
+  }
+
+  private async detectTestCommand(repositoryPath: string): Promise<string | null> {
+    // Check for common test configurations
+    if (await this.pathExists(path.join(repositoryPath, 'package.json'))) {
+      const packageJson = JSON.parse(await fs.readFile(path.join(repositoryPath, 'package.json'), 'utf8'))
+      if (packageJson.scripts?.test) return 'npm test'
+    }
+
+    if (await this.pathExists(path.join(repositoryPath, 'pytest.ini'))) {
+      return 'pytest'
+    }
+
+    if (await this.pathExists(path.join(repositoryPath, 'go.mod'))) {
+      return 'go test ./...'
+    }
+
+    if (await this.pathExists(path.join(repositoryPath, 'Cargo.toml'))) {
+      return 'cargo test'
+    }
+
+    return null
+  }
+
+  private async detectBuildArtifacts(repositoryPath: string): Promise<string[]> {
+    const artifacts: string[] = []
+    
+    const commonArtifactPaths = [
+      'dist', 'build', 'target', 'out', '.next', 
+      'public/build', 'static/build', 'lib'
+    ]
+
+    for (const artifactPath of commonArtifactPaths) {
+      const fullPath = path.join(repositoryPath, artifactPath)
+      if (await this.pathExists(fullPath)) {
+        artifacts.push(artifactPath)
+      }
+    }
+
+    return artifacts
+  }
+
+  private parseTestResults(stdout: string, stderr: string): any {
+    // Simple test result parsing - can be enhanced for specific test frameworks
+    return {
+      raw_output: stdout,
+      error_output: stderr,
+      passed: !stderr.includes('FAIL') && !stderr.includes('Error'),
+      summary: 'Test execution completed'
+    }
+  }
+
+  private async packageAsDocker(repositoryPath: string, outputPath: string, registry?: string): Promise<any> {
+    const dockerfilePath = path.join(repositoryPath, 'Dockerfile')
+    
+    if (!await this.pathExists(dockerfilePath)) {
+      throw new Error('Dockerfile not found in repository')
+    }
+
+    const repoName = path.basename(repositoryPath).toLowerCase()
+    const tag = `${repoName}:latest`
+    const fullTag = registry ? `${registry}/${tag}` : tag
+
+    // Build Docker image
+    const buildCommand = `docker build -t ${fullTag} .`
+    const { stdout, stderr } = await execAsync(buildCommand, { cwd: repositoryPath })
+
+    // Save image to tar file
+    const saveCommand = `docker save ${fullTag} -o ${outputPath}`
+    await execAsync(saveCommand)
+
+    const stats = await fs.stat(outputPath)
+
+    return {
+      image_tag: fullTag,
+      size_mb: Math.round(stats.size / 1024 / 1024),
+      output: { stdout, stderr }
+    }
+  }
+
+  private async packageAsZip(repositoryPath: string, outputPath: string): Promise<any> {
+    // Ensure output directory exists
+    await fs.mkdir(path.dirname(outputPath), { recursive: true })
+
+    const zipCommand = `zip -r ${outputPath} . -x "*.git*" "node_modules/*" "*.log"`
+    const { stdout, stderr } = await execAsync(zipCommand, { cwd: repositoryPath })
+
+    const stats = await fs.stat(outputPath)
+
+    return {
+      size_mb: Math.round(stats.size / 1024 / 1024),
+      output: { stdout, stderr }
+    }
+  }
+
+  private async packageAsTar(repositoryPath: string, outputPath: string): Promise<any> {
+    // Ensure output directory exists
+    await fs.mkdir(path.dirname(outputPath), { recursive: true })
+
+    const tarCommand = `tar -czf ${outputPath} --exclude=.git --exclude=node_modules --exclude=*.log .`
+    const { stdout, stderr } = await execAsync(tarCommand, { cwd: repositoryPath })
+
+    const stats = await fs.stat(outputPath)
+
+    return {
+      size_mb: Math.round(stats.size / 1024 / 1024),
+      output: { stdout, stderr }
+    }
   }
 }
